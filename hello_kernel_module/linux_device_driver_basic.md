@@ -1,26 +1,99 @@
-# 디바이스 드라이버의 배포와 개발 (웹캠 제조사 개발자 입장)
+# 디바이스 드라이버
 
-1. USB 웹캠을 제조한다.
+커널 드라이버들은 메인보드에 어떻게 연결되는지에 따라 이미 잘 만들어져있는 라이브러리나 프레임워크같은 틀이 있고, 그걸 기반으로 만들어지며,
 
-→ USB 장치에는 **Vendor ID (VID)**와 **Product ID (PID)**가 있음
-→ 예: 0x1234, 0x5678
+usb 나 pci 장치로 분류되어있는 특수한 드라이버들은 미리 정의된 함수를 통해서 udev 를 거쳐 자동으로 /dev 에 디바이스 파일을 자동으로 만듦.
 
-2. 리눅스용 드라이버를 개발 (커널 모듈 형태가 일반적)
+USB 장치 → `usb_driver`, `usb_register()`
 
-- UVC(USB Video Class)를 지원하면 기본 드라이버로 작동할 수 있음 (uvcvideo)
-- 아니면, 자체 커널 드라이버를 개발해서 등록
+PCI 장치 → `pci_driver`, `pci_register_driver()`
+
+Platform 장치 → `platform_driver`
+
+블록 장치 → `block_device_operations`
+
+네트워크 → `net_device_ops`
+
+이런 드라이버들은 장치가 메인보드를 통해 연결되는 즉시 커널이 드라이버의 `probe()` 를 호출하고, `udev`를 통해 `/dev` 아래에 자동으로 디바이스 파일 생성.
+
+`probe()` 는 디바이스 드라이버 코드에 선언되어있는 함수임. 예를 들어, usb 장치의 코드에서, `.probe = myusb_probe,` 처럼 등록됨.
 
 ```c
+#include <linux/module.h>
+#include <linux/usb.h>
+#include <linux/fs.h>
+#include <linux/uaccess.h>
+#include <linux/cdev.h>
+#include <linux/device.h>
+
+#define DEVICE_NAME "myusb"
+#define USB_MY_VENDOR_ID  0x1234
+#define USB_MY_PRODUCT_ID 0x5678
+
+static dev_t dev_number;
+static struct cdev my_cdev;
+static struct class *my_class;
+
+static int myusb_open(struct inode *inode, struct file *file) {
+    pr_info("myusb: device opened\n");
+    return 0;
+}
+
 // ... 중략
-usb_register(&mywebcam_driver);
-//
+
+static struct file_operations fops = {
+    .owner = THIS_MODULE,
+    .open = myusb_open,
+    .release = myusb_release,
+};
+
+static int myusb_probe(struct usb_interface *interface, const struct usb_device_id *id) {
+    pr_info("myusb: USB device plugged in (vendor=0x%x, product=0x%x)\n", id->idVendor, id->idProduct);
+
+    // 장치 번호 할당 및 /dev/myusb0 생성
+    alloc_chrdev_region(&dev_number, 0, 1, DEVICE_NAME);
+    cdev_init(&my_cdev, &fops);
+    cdev_add(&my_cdev, dev_number, 1);
+
+    my_class = class_create(THIS_MODULE, DEVICE_NAME);
+    device_create(my_class, NULL, dev_number, NULL, "myusb0");
+
+    return 0;
+}
+
+// ... 중략
+
+MODULE_DEVICE_TABLE(usb, myusb_table);
+
+static struct usb_driver myusb_driver = {
+    .name = DEVICE_NAME,
+    .id_table = myusb_table,
+    .probe = myusb_probe,
+    .disconnect = myusb_disconnect,
+};
+
+module_usb_driver(myusb_driver);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("You");
+MODULE_DESCRIPTION("Example USB driver");
+
 ```
 
-3. 드라이버가 커널에 장치를 등록하면
 
-- 커널이 **장치 등록 이벤트**를 발생시킴
-- udev가 이 이벤트를 잡아서 /dev/videoX 같은 디바이스 파일 자동 생성
+### 호스트 컨트롤러 드라이버
+빌트인 드라이버(OS가 설치될 때 설치됨. 부팅 시 로드되며 작동 중 해제되지 않음) 이며, 클라이언트 
+`ehci_hcd`(USB 2.0) `xhci_hcd`(USB 3.0) `usbhid` (HID장치 즉 마우스,키보드) 가 있음.
 
+- 컴퓨터에 연결되는 디지털 장치들은 컴퓨터에 연결되면 자신의 `VID`와 `PID`를 컴퓨터로 전송하도록 되어있음.
+- 커널에 로드되어있는 호스트 컨트롤러 드라이버는 장치가 연결되면, 장치의 `VID` 와 `PID` 를 보고 일치하는 "클라이언트 드라이버"를 찾은다음, 안에 있는 `probe()` 를 호출함.
+    - `VID`는 Vendor ID 로, 이런 단체(https://www.usb.org/)에 회사를 등록해야함.
+    - `PID`는 Product ID 로, 걍 장치랑 디바이스 드라이버를 만든 사람이 임의로 지음
+    - Linux 커널은 `VID` 와 `PID` 조합으로 장치를 식별함.
+
+### 클라이언트 드라이버
+호스트 컨트롤러 드라이버에 의해 호출 당하면 해당 장치를 위한 작업을 수행함.
+`uvcvideo` (USB 웹캠) 등
 
 
 # 리눅스 커널 드라이버의 종류
